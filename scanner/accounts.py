@@ -18,7 +18,7 @@ import os
 import time
 from collections import Counter, defaultdict
 
-from .common import new_result, read_lines, file_meta, emit
+from .common import new_result, read_lines, file_meta, emit, parse_login_defs
 
 # Groups where membership = elevated power. We report membership as a FACT;
 # the rule engine decides what to flag.
@@ -53,18 +53,6 @@ def _int_or_none(s: str):
         return int(s)
     except ValueError:
         return None
-
-
-def parse_login_defs(result) -> dict:
-    wanted = {}
-    for line in read_lines("/etc/login.defs", result):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            wanted[parts[0]] = parts[1].strip()
-    return wanted
 
 
 def classify_hash(field: str) -> dict:

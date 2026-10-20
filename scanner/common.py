@@ -4,12 +4,17 @@ Design rule: collectors report FACTS only. No "this is bad" judgments here --
 that is the rule engine's job (Phase 2). Keeping them separate means you can
 change a rule without re-scanning, and test rules against saved JSON.
 """
+import hashlib
+import ipaddress
 import json
 import os
 import pwd
 import grp
+import re
+import shutil
 import socket
 import stat
+import subprocess
 import sys
 from datetime import datetime, timezone
 
@@ -87,3 +92,66 @@ def emit(result: dict, out_path: str | None = None, pretty: bool = True) -> None
         print(f"[+] wrote {out_path}", file=sys.stderr)
     else:
         print(text)
+
+
+def sha256_file(path: str) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def pacman_owners(paths: list[str]) -> dict | None:
+    """path -> {package, version}. Paths absent from the dict are owned by NO package."""
+    if not shutil.which("pacman"):
+        return None
+    owners = {}
+    env = dict(os.environ, LC_ALL="C")
+    for i in range(0, len(paths), 100):
+        chunk = paths[i:i + 100]
+        try:
+            p = subprocess.run(["pacman", "-Qo", *chunk], capture_output=True,
+                               text=True, env=env, timeout=60)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        for line in p.stdout.splitlines():
+            m = re.match(r"^(.+) is owned by (\S+) (\S+)$", line)
+            if m:
+                owners[m.group(1)] = {"package": m.group(2), "version": m.group(3)}
+    return owners
+
+
+def parse_login_defs(result) -> dict:
+    wanted = {}
+    for line in read_lines("/etc/login.defs", result):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            wanted[parts[0]] = parts[1].strip()
+    return wanted
+
+
+def classify_addr(ip: str | None) -> str | None:
+    if not ip:
+        return None
+    try:
+        a = ipaddress.ip_address(ip.split("%")[0])
+    except ValueError:
+        return None
+    if getattr(a, "ipv4_mapped", None):
+        a = a.ipv4_mapped
+    if a.is_unspecified:
+        return "all_interfaces"
+    if a.is_loopback:
+        return "loopback"
+    if a.is_link_local:
+        return "link_local"
+    if a.is_private:
+        return "private"
+    return "public"
