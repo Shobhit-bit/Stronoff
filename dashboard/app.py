@@ -34,6 +34,8 @@ COLLECTORS = {
     "persistence": {"title": "Persistence", "fast": []},
 }
 
+EXPECTED_COLLECTOR_VERSION = "1.1"
+
 st.set_page_config(page_title="vulnscan", page_icon="🛡️", layout="wide")
 
 
@@ -48,6 +50,14 @@ def g(d, *keys, default=None):
         if d is None:
             return default
     return d
+
+
+def num(x, default=0.0):
+    """Coerce numbers that may arrive as strings (e.g. exposure '9.6') to float."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
 
 
 def fmt_epoch(e):
@@ -130,7 +140,7 @@ use_sudo = st.sidebar.checkbox("Rerun with `sudo -n`", False,
                                     "sees your password, by design.")
 st.sidebar.caption("Best practice: run this dashboard as your normal user and collect with "
                    "`sudo ./run_all.sh \"$(which python)\"` in a terminal.")
-if st.sidebar.button("🔄 Reload JSON from disk"):
+if st.sidebar.button("Reload JSON from disk"):
     st.cache_data.clear()
     st.rerun()
 
@@ -190,7 +200,7 @@ def top(name):
     info = COLLECTORS[name]
     c1, c2 = st.columns([5, 2])
     c1.subheader(info["title"])
-    if c2.button(f"🔄 Rerun {name}", key=f"rr_{name}", width="stretch"):
+    if c2.button(f"Rerun {name}", key=f"rr_{name}", width="stretch"):
         with st.spinner(f"Running collectors.{name} … {info.get('note', '')}"):
             ok, msg = rerun(name)
         if ok:
@@ -215,12 +225,16 @@ def top(name):
     m = st.columns(4)
     m[0].caption(f"**Collected:** {fmt_age(res.get('timestamp'))}")
     m[1].caption(f"**Host:** {res.get('host')}")
-    m[2].caption("**Root:** " + ("✅ yes" if res.get("ran_as_root") else "⚠️ no (reduced coverage)"))
-    m[3].caption(f"**Schema:** {res.get('schema_version')}")
+    m[2].caption("**Root:** " + ("yes" if res.get("ran_as_root") else "NO (reduced coverage)"))
+    m[3].caption(f"**Schema:** {res.get('schema_version')} · collector v{res.get('collector_version', '?')}")
+    if res.get("collector_version") != EXPECTED_COLLECTOR_VERSION:
+        st.warning(f"This JSON came from an OLDER collector (v{res.get('collector_version', 'pre-1.1')}, "
+                   f"expected v{EXPECTED_COLLECTOR_VERSION}). Update collectors/*.py and rerun, otherwise "
+                   "you may be looking at already-fixed bugs (e.g. symlinks shown as 0777).")
     for w in res.get("warnings", []):
         st.warning(w)
     if res.get("errors"):
-        with st.expander(f"⚠️ {len(res['errors'])} collection error(s)"):
+        with st.expander(f"{len(res['errors'])} collection error(s)"):
             show(res["errors"])
     return res.get("data") or {}
 
@@ -353,7 +367,7 @@ def r_services(d):
                    "exec": [e.get("path") for e in s.get("exec_start", [])]}
             if match(row, q):
                 rows.append(row)
-        rows.sort(key=lambda r: -(r["exposure"] or 0))
+        rows.sort(key=lambda r: -num(r["exposure"]))
         show(rows)
         st.caption("Failed units: " + (", ".join(d.get("failed_units", [])) or "none"))
     with t2:
@@ -625,7 +639,7 @@ def overview():
         p = out_dir / f"{name}.json"
         res = load(name) if p.exists() else None
         ok = isinstance(res, dict) and "_load_error" not in res
-        rows.append({"collector": info["title"], "file": "✅" if ok else "—",
+        rows.append({"collector": info["title"], "file": "yes" if ok else "—",
                      "collected": fmt_age(res.get("timestamp")) if ok else "—",
                      "root": res.get("ran_as_root") if ok else None,
                      "warnings": len(res.get("warnings", [])) if ok else None,
@@ -634,7 +648,7 @@ def overview():
         if ok:
             warns += [(info["title"], w) for w in res.get("warnings", [])]
     show(rows)
-    if st.button("🔄 Rerun ALL collectors"):
+    if st.button("Rerun ALL collectors"):
         bar = st.progress(0.0)
         for i, name in enumerate(COLLECTORS, 1):
             with st.spinner(f"{name} …"):
