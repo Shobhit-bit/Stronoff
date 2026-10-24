@@ -12,13 +12,16 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+ALLOWLIST = ROOT / "allowlist.yaml"
+THRESHOLDS = ROOT / "thresholds.yaml"
 DEFAULT_OUT = Path(os.environ.get("VULNSCAN_OUTPUT", ROOT / "output"))
 
 COLLECTORS = {
@@ -34,6 +37,8 @@ COLLECTORS = {
     "persistence": {"title": "Persistence", "fast": []},
 }
 
+EXPECTED_COLLECTOR_VERSION = "1.2"
+
 st.set_page_config(page_title="vulnscan", page_icon="🛡️", layout="wide")
 
 
@@ -48,6 +53,14 @@ def g(d, *keys, default=None):
         if d is None:
             return default
     return d
+
+
+def num(x, default=0.0):
+    """Coerce numbers that may arrive as strings (e.g. exposure '9.6') to float."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
 
 
 def fmt_epoch(e):
@@ -130,7 +143,7 @@ use_sudo = st.sidebar.checkbox("Rerun with `sudo -n`", False,
                                     "sees your password, by design.")
 st.sidebar.caption("Best practice: run this dashboard as your normal user and collect with "
                    "`sudo ./run_all.sh \"$(which python)\"` in a terminal.")
-if st.sidebar.button("🔄 Reload JSON from disk"):
+if st.sidebar.button("Reload JSON from disk"):
     st.cache_data.clear()
     st.rerun()
 
@@ -190,7 +203,7 @@ def top(name):
     info = COLLECTORS[name]
     c1, c2 = st.columns([5, 2])
     c1.subheader(info["title"])
-    if c2.button(f"🔄 Rerun {name}", key=f"rr_{name}", width="stretch"):
+    if c2.button(f"Rerun {name}", key=f"rr_{name}", width="stretch"):
         with st.spinner(f"Running collectors.{name} … {info.get('note', '')}"):
             ok, msg = rerun(name)
         if ok:
@@ -215,12 +228,16 @@ def top(name):
     m = st.columns(4)
     m[0].caption(f"**Collected:** {fmt_age(res.get('timestamp'))}")
     m[1].caption(f"**Host:** {res.get('host')}")
-    m[2].caption("**Root:** " + ("✅ yes" if res.get("ran_as_root") else "⚠️ no (reduced coverage)"))
-    m[3].caption(f"**Schema:** {res.get('schema_version')}")
+    m[2].caption("**Root:** " + ("yes" if res.get("ran_as_root") else "NO (reduced coverage)"))
+    m[3].caption(f"**Schema:** {res.get('schema_version')} · collector v{res.get('collector_version', '?')}")
+    if res.get("collector_version") != EXPECTED_COLLECTOR_VERSION:
+        st.warning(f"This JSON came from an OLDER collector (v{res.get('collector_version', 'pre-1.1')}, "
+                   f"expected v{EXPECTED_COLLECTOR_VERSION}). Update collectors/*.py and rerun, otherwise "
+                   "you may be looking at already-fixed bugs (e.g. symlinks shown as 0777).")
     for w in res.get("warnings", []):
         st.warning(w)
     if res.get("errors"):
-        with st.expander(f"⚠️ {len(res['errors'])} collection error(s)"):
+        with st.expander(f"{len(res['errors'])} collection error(s)"):
             show(res["errors"])
     return res.get("data") or {}
 
@@ -353,7 +370,7 @@ def r_services(d):
                    "exec": [e.get("path") for e in s.get("exec_start", [])]}
             if match(row, q):
                 rows.append(row)
-        rows.sort(key=lambda r: -(r["exposure"] or 0))
+        rows.sort(key=lambda r: -num(r["exposure"]))
         show(rows)
         st.caption("Failed units: " + (", ".join(d.get("failed_units", [])) or "none"))
     with t2:
@@ -616,6 +633,112 @@ RENDER = {"accounts": r_accounts, "filesystem": r_filesystem, "processes": r_pro
           "kernel": r_kernel, "persistence": r_persistence}
 
 
+# ───────────────────────── findings (rule engine) ─────────────────────────
+
+SEV_ORDER = ["critical", "high", "medium", "low", "info"]
+
+
+def run_engine():
+    cmd = [python_bin, "-m", "engine", "--output", str(out_dir),
+           "--thresholds", str(THRESHOLDS), "--allowlist", str(ALLOWLIST)]
+    try:
+        p = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return False, str(e)
+    return p.returncode == 0, (p.stderr.strip() or p.stdout.strip())[-600:]
+
+
+def findings_tab():
+    c1, c2 = st.columns([5, 2])
+    c1.subheader("Findings")
+    if c2.button("Run rule engine", key="run_engine", width="stretch"):
+        with st.spinner("Evaluating rules ..."):
+            ok, msg = run_engine()
+        flash("success" if ok else "error", "Rule engine finished." if ok else f"Rule engine failed: {msg}")
+        st.cache_data.clear()
+        st.rerun()
+    with st.expander("Terminal command"):
+        st.code(f"{python_bin} -m engine --output {out_dir}", language="bash")
+
+    rep = load("findings")
+    if rep is None:
+        st.info("No findings.json yet. Collect data first, then click 'Run rule engine'.")
+        return
+    if "_load_error" in rep:
+        st.error(f"Could not read findings.json: {rep['_load_error']}")
+        return
+
+    cov = rep.get("coverage", {})
+    unknown = cov.get("unknown", 0) + cov.get("error", 0)
+    banner = (f"Coverage: {cov.get('evaluated')} of {cov.get('rules_total')} rules evaluated · "
+              f"{cov.get('pass')} pass · {cov.get('fail')} with findings · {unknown} UNKNOWN · {cov.get('na')} N/A")
+    (st.warning if unknown else st.success)(banner + (" · UNKNOWN means 'could not check', not 'safe'." if unknown else ""))
+    bad = {n: v for n, v in cov.get("collectors", {}).items() if v.get("status") != "ok"}
+    if bad:
+        st.error("Collector data problems: " + "; ".join(f"{n}: {v.get('reason')}" for n, v in bad.items()))
+    if cov.get("unknown_reasons"):
+        with st.expander(f"Why {unknown} rule(s) are UNKNOWN"):
+            show(cov["unknown_reasons"])
+    al = rep.get("allowlist", {})
+    if al.get("expired") or al.get("invalid"):
+        st.warning(f"Allowlist: {len(al.get('expired', []))} expired entr(ies), {len(al.get('invalid', []))} invalid entr(ies) ignored.")
+
+    allf = rep.get("findings", [])
+    live = [f for f in allf if not f["suppressed"]]
+    metrics({s.capitalize(): sum(f["severity"] == s for f in live) for s in SEV_ORDER})
+
+    c1, c2, c3 = st.columns(3)
+    sevs = c1.multiselect("Severity", SEV_ORDER, default=SEV_ORDER, key="fd_sev")
+    cats = c2.multiselect("Category", sorted({f["category"] for f in allf}), default=sorted({f["category"] for f in allf}), key="fd_cat")
+    q = c3.text_input("Search", key="fd_q", placeholder="rule, subject, text ...").strip().lower()
+    show_sup = st.checkbox("Show suppressed findings", key="fd_sup")
+    rows = [f for f in allf if f["severity"] in sevs and f["category"] in cats and (show_sup or not f["suppressed"])
+            and (not q or q in json.dumps(f, default=str).lower())]
+    show([{"severity": f["severity"], "conf": f["confidence"], "rule": f["rule_id"], "title": f["title"],
+           "subject": f["subject"], "category": f["category"],
+           "net-exposed": f["features"].get("network_exposed"), "root": f["features"].get("runs_as_root"),
+           "suppressed": f["suppressed"]} for f in rows], empty="No findings match the filters.")
+
+    if rows:
+        labels = [f"[{f['severity'].upper()}] {f['rule_id']}  {f['subject'][:80]}" for f in rows]
+        i = labels.index(st.selectbox("Details", labels, key="fd_sel"))
+        f = rows[i]
+        st.markdown(f"**{f['title']}**  \nSeverity `{f['severity']}` · confidence `{f['confidence']}` · category `{f['category']}` · rule v{f['rule_version']}")
+        st.markdown(f"**Why it matters.** {f['why']}")
+        st.markdown(f"**What to do.** {f['fix']}")
+        st.caption(f"Evidence ({f['evidence_total']} total, up to 10 shown)")
+        show(f["evidence"])
+        if f["suppressed"]:
+            st.info(f"Suppressed: {f['suppression']['reason']} (expires {f['suppression']['expires']})")
+        else:
+            with st.expander("Suppress this finding (adds an allowlist entry)"):
+                with st.form("suppress_form"):
+                    reason = st.text_input("Reason (required)")
+                    exp = st.date_input("Expires", value=date.today() + timedelta(days=90))
+                    pin = st.checkbox("Pin to the file's sha256", value=bool(f["attrs"].get("sha256")),
+                                      disabled=not f["attrs"].get("sha256"))
+                    go = st.form_submit_button("Add to allowlist")
+                if go:
+                    if not reason.strip():
+                        st.error("A reason is required.")
+                    else:
+                        from engine.allowlist import append_entry
+                        entry = {"rule_id": f["rule_id"], "subject": f["subject"], "reason": reason.strip(), "expires": exp}
+                        if pin and f["attrs"].get("sha256"):
+                            entry["sha256"] = f["attrs"]["sha256"]
+                        append_entry(str(ALLOWLIST), entry)
+                        ok, msg = run_engine()
+                        st.cache_data.clear()
+                        flash("success" if ok else "error", f"Added to allowlist and re-ran the engine." if ok else f"Allowlist updated but engine failed: {msg}")
+                        st.rerun()
+
+    with st.expander("All rules and their outcomes"):
+        show([{"rule": r["rule_id"], "outcome": r["outcome"], "findings": r["finding_count"],
+               "suppressed": r["suppressed_count"], "reason": r["reason"], "title": r["title"]} for r in rep.get("rules", [])])
+    st.caption(f"Engine v{rep.get('engine_version')} · scan {rep.get('scan_timestamp')}")
+
+
+
 # ───────────────────────── overview + layout ─────────────────────────
 
 def overview():
@@ -625,7 +748,7 @@ def overview():
         p = out_dir / f"{name}.json"
         res = load(name) if p.exists() else None
         ok = isinstance(res, dict) and "_load_error" not in res
-        rows.append({"collector": info["title"], "file": "✅" if ok else "—",
+        rows.append({"collector": info["title"], "file": "yes" if ok else "—",
                      "collected": fmt_age(res.get("timestamp")) if ok else "—",
                      "root": res.get("ran_as_root") if ok else None,
                      "warnings": len(res.get("warnings", [])) if ok else None,
@@ -634,13 +757,15 @@ def overview():
         if ok:
             warns += [(info["title"], w) for w in res.get("warnings", [])]
     show(rows)
-    if st.button("🔄 Rerun ALL collectors"):
+    if st.button("Rerun ALL collectors"):
         bar = st.progress(0.0)
         for i, name in enumerate(COLLECTORS, 1):
             with st.spinner(f"{name} …"):
                 ok, msg = rerun(name)
             flash("success" if ok else "error", f"{name}: {'ok' if ok else msg}")
             bar.progress(i / len(COLLECTORS))
+        ok, msg = run_engine()
+        flash("success" if ok else "error", "rule engine: ok" if ok else f"rule engine: {msg}")
         st.cache_data.clear()
         st.rerun()
     st.markdown("**Full-coverage collection (recommended):**")
@@ -651,10 +776,15 @@ def overview():
     st.caption("This dashboard shows collected facts only. Scoring and prioritisation come in later phases.")
 
 
-tabs = st.tabs(["Overview"] + [v["title"] for v in COLLECTORS.values()])
+tabs = st.tabs(["Overview", "Findings"] + [v["title"] for v in COLLECTORS.values()])
 with tabs[0]:
     overview()
-for tab, name in zip(tabs[1:], COLLECTORS):
+with tabs[1]:
+    try:
+        findings_tab()
+    except Exception as e:
+        st.error(f"Could not render findings: {type(e).__name__}: {e}")
+for tab, name in zip(tabs[2:], COLLECTORS):
     with tab:
         data = top(name)
         if data is not None:
