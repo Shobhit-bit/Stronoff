@@ -110,7 +110,11 @@ def parse_analyze(text: str) -> dict[str, dict]:
         for item in json.loads(text):
             unit = item.get("unit")
             if unit:
-                out[unit] = {"exposure": item.get("exposure"), "predicate": item.get("predicate")}
+                try:
+                    expo = float(item.get("exposure"))
+                except (TypeError, ValueError):
+                    expo = None
+                out[unit] = {"exposure": expo, "predicate": item.get("predicate")}
         if out:
             return out
     except (json.JSONDecodeError, AttributeError, TypeError):

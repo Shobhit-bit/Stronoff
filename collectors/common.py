@@ -19,12 +19,14 @@ import sys
 from datetime import datetime, timezone
 
 SCHEMA_VERSION = "1.0"
+COLLECTOR_VERSION = "1.2"   # bump when collector behaviour changes; the dashboard warns on older JSON
 
 
 def new_result(collector: str) -> dict:
     """Standard envelope every collector returns."""
     return {
         "schema_version": SCHEMA_VERSION,
+        "collector_version": COLLECTOR_VERSION,
         "collector": collector,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "host": socket.gethostname(),
@@ -50,13 +52,37 @@ def read_lines(path: str, result: dict) -> list[str]:
 
 
 def file_meta(path: str) -> dict:
-    """Permission/ownership facts about a path (does not follow symlinks)."""
+    """Permission/ownership facts about a path.
+
+    For a SYMLINK the link's own mode is always 0777 and meaningless, so the permission
+    fields describe the TARGET (what an attacker could actually modify). The link itself is
+    flagged with is_symlink / link_target / broken_symlink.
+    """
     try:
-        st = os.lstat(path)
+        lst = os.lstat(path)
     except FileNotFoundError:
         return {"path": path, "exists": False}
     except PermissionError:
         return {"path": path, "exists": None, "error": "permission_denied"}
+
+    is_link = stat.S_ISLNK(lst.st_mode)
+    extra: dict = {}
+    st = lst
+    if is_link:
+        try:
+            extra["link_target"] = os.readlink(path)
+        except OSError:
+            extra["link_target"] = None
+        try:
+            st = os.stat(path)
+            extra["broken_symlink"] = False
+        except FileNotFoundError:
+            return {"path": path, "exists": True, "is_symlink": True, "broken_symlink": True,
+                    "link_target": extra["link_target"], "mode": None, "uid": lst.st_uid,
+                    "gid": lst.st_gid, "owner": None, "group": None, "is_dir": False,
+                    "world_readable": None, "world_writable": None, "group_writable": None}
+        except OSError:
+            extra["broken_symlink"] = None
 
     try:
         owner = pwd.getpwuid(st.st_uid).pw_name
@@ -76,11 +102,12 @@ def file_meta(path: str) -> dict:
         "gid": st.st_gid,
         "owner": owner,
         "group": group,
-        "is_symlink": stat.S_ISLNK(st.st_mode),
+        "is_symlink": is_link,
         "is_dir": stat.S_ISDIR(st.st_mode),
         "world_readable": bool(mode & stat.S_IROTH),
         "world_writable": bool(mode & stat.S_IWOTH),
         "group_writable": bool(mode & stat.S_IWGRP),
+        **extra,
     }
 
 
@@ -122,6 +149,13 @@ def pacman_owners(paths: list[str]) -> dict | None:
             m = re.match(r"^(.+) is owned by (\S+) (\S+)$", line)
             if m:
                 owners[m.group(1)] = {"package": m.group(2), "version": m.group(3)}
+    # pacman prints the path with symlinked directories resolved (/bin/sh -> /usr/bin/sh). Map
+    # every requested path to its resolved spelling so '/bin/x' is not misreported as unowned.
+    for p in paths:
+        if p not in owners:
+            rp = os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))
+            if rp in owners:
+                owners[p] = owners[rp]
     return owners
 
 

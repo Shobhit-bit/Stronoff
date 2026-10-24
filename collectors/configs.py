@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 from .common import new_result, read_lines, file_meta, emit, parse_login_defs
 
@@ -62,9 +63,20 @@ def collect_ssh(result: dict) -> dict:
     if not sshd:
         return {"installed": False}
     sec: dict = {"installed": True, "effective": None}
+    sec["host_keys_present"] = bool(glob.glob("/etc/ssh/ssh_host_*_key"))
     rc, out, err = run([sshd, "-T"])
+    if rc != 0 and "no hostkeys available" in err and shutil.which("ssh-keygen"):
+        # sshd has never started here, so no host keys exist. Use a throw-away key so we can
+        # still read the effective config (nothing is written under /etc/ssh).
+        with tempfile.TemporaryDirectory() as td:
+            key = os.path.join(td, "k")
+            if run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key])[0] == 0:
+                rc, out, err = run([sshd, "-T", "-h", key])
+                if rc == 0:
+                    sec["hostkey_substituted"] = True
     if rc == 0:
         sec["effective"] = parse_sshd_T(out)
+        sec["effective"].pop("hostkey", None)      # would show the temp key path
     else:
         sec["effective_error"] = err.strip()[:200]
         result["warnings"].append(
