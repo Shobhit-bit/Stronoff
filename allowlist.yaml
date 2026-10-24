@@ -1,0 +1,4 @@
+# vulnscan allowlist. Each entry needs rule_id, subject (fnmatch glob allowed), reason, expires.
+# Optional: sha256 (must match the finding's sha256 attribute when the rule provides one).
+# Expired entries stop suppressing. This file is rewritten by the dashboard; keep comments elsewhere.
+[]

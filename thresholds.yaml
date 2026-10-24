@@ -1,0 +1,4 @@
+# Overrides for engine/config.py DEFAULTS. Only list what you want to change.
+# stale_upgrade_days: {medium: 30, high: 90}
+# brute_force_min_failures: 5
+# risky_ports: [21, 23, 69, 111, 445, 2049, 2375, 3306, 5432, 5900, 6379, 9200, 11211, 27017]
