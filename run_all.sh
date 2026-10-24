@@ -22,6 +22,8 @@ for c in accounts filesystem processes services packages configs network logs ke
     echo "FAILED  -> see output/.$c.err"; fail=1
   fi
 done
+printf '%-12s ' "engine"
+if "$PY" -m engine --output output > output/.engine.txt 2>&1; then head -1 output/.engine.txt; else echo "FAILED -> see output/.engine.txt"; fail=1; fi
 # JSON written by root must stay readable/overwritable by the dashboard user
 if [ -n "${SUDO_UID:-}" ]; then chown -R "$SUDO_UID:$SUDO_GID" output; fi
 exit $fail
