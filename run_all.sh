@@ -24,6 +24,8 @@ for c in accounts filesystem processes services packages configs network logs ke
 done
 printf '%-12s ' "engine"
 if "$PY" -m engine --output output > output/.engine.txt 2>&1; then head -1 output/.engine.txt; else echo "FAILED -> see output/.engine.txt"; fail=1; fi
+printf '%-12s ' "history/ml"
+if "$PY" -m ml run --output output > output/.ml.txt 2>&1; then head -1 output/.ml.txt; else echo "not recorded -> $(head -1 output/.ml.txt)"; fi
 # JSON written by root must stay readable/overwritable by the dashboard user
 if [ -n "${SUDO_UID:-}" ]; then chown -R "$SUDO_UID:$SUDO_GID" output; fi
 exit $fail
